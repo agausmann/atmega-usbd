@@ -3,7 +3,7 @@
 use core::cmp::max;
 
 use atmega_hal::pac::USB_DEVICE;
-use avr_device::interrupt::Mutex;
+use avr_device::interrupt::{self, CriticalSection, Mutex};
 use usb_device::{
     endpoint::{EndpointAddress, EndpointType},
     UsbDirection, UsbError,
@@ -31,10 +31,10 @@ const EP_SIZE_512: u8 = 0b110;
 
 #[derive(Default)]
 struct EndpointTableEntry {
-    allocated: bool,
-    ep_type_bits: u8,
-    ep_dir_bit: bool,
-    ep_size_bits: u8,
+    is_allocated: bool,
+    eptype_bits: u8,
+    epdir_bit: bool,
+    epsize_bits: u8,
 }
 
 pub struct UsbBus {
@@ -50,6 +50,17 @@ impl UsbBus {
             endpoints: Default::default(),
             dpram_usage: 0,
         }
+    }
+
+    fn set_current_endpoint(&self, cs: &CriticalSection, index: usize) -> Result<(), UsbError> {
+        if index >= MAX_ENDPOINTS {
+            return Err(UsbError::InvalidEndpoint);
+        }
+        self.usb
+            .borrow(cs)
+            .uenum
+            .write(|w| unsafe { w.bits(index as u8) });
+        Ok(())
     }
 }
 
@@ -70,7 +81,7 @@ impl usb_device::bus::UsbBus for UsbBus {
         }
 
         let ep_addr = match ep_addr {
-            Some(addr) if !self.endpoints[addr.index()].allocated => addr,
+            Some(addr) if !self.endpoints[addr.index()].is_allocated => addr,
             _ => {
                 // Find next free endpoint
                 let index = self
@@ -78,7 +89,7 @@ impl usb_device::bus::UsbBus for UsbBus {
                     .iter()
                     .enumerate()
                     .find_map(|(index, ep)| {
-                        if !ep.allocated && max_packet_size <= ENDPOINT_MAX_BUFSIZE[index] {
+                        if !ep.is_allocated && max_packet_size <= ENDPOINT_MAX_BUFSIZE[index] {
                             Some(index)
                         } else {
                             None
@@ -89,13 +100,13 @@ impl usb_device::bus::UsbBus for UsbBus {
             }
         };
         let entry = &mut self.endpoints[ep_addr.index()];
-        entry.ep_type_bits = match ep_type {
+        entry.eptype_bits = match ep_type {
             EndpointType::Control => EP_TYPE_CONTROL,
             EndpointType::Isochronous => EP_TYPE_ISOCHRONOUS,
             EndpointType::Bulk => EP_TYPE_BULK,
             EndpointType::Interrupt => EP_TYPE_INTERRUPT,
         };
-        entry.ep_dir_bit = match ep_dir {
+        entry.epdir_bit = match ep_dir {
             UsbDirection::Out => EP_DIR_OUT,
             UsbDirection::In => EP_DIR_IN,
         };
@@ -103,7 +114,7 @@ impl usb_device::bus::UsbBus for UsbBus {
         if DPRAM_SIZE - self.dpram_usage < ep_size {
             return Err(UsbError::EndpointMemoryOverflow);
         }
-        entry.ep_size_bits = match ep_size {
+        entry.epsize_bits = match ep_size {
             8 => EP_SIZE_8,
             16 => EP_SIZE_16,
             32 => EP_SIZE_32,
@@ -115,17 +126,57 @@ impl usb_device::bus::UsbBus for UsbBus {
         };
 
         // Configuration succeeded, commit/finalize:
-        entry.allocated = true;
+        entry.is_allocated = true;
         self.dpram_usage += ep_size;
         Ok(ep_addr)
     }
 
     fn enable(&mut self) {
-        todo!()
+        interrupt::free(|cs| {
+            let usb = self.usb.borrow(cs);
+            usb.uhwcon.modify(|_, w| w.uvrege().set_bit());
+            usb.usbcon
+                .modify(|_, w| w.usbe().set_bit().otgpade().set_bit());
+            // NB: FRZCLK must be modified while USBE is set:
+            usb.usbcon.modify(|_, w| w.frzclk().clear_bit());
+            usb.udcon.modify(|_, w| w.detach().clear_bit());
+        });
     }
 
     fn reset(&self) {
-        todo!()
+        interrupt::free(|cs| {
+            let usb = self.usb.borrow(cs);
+            usb.udint.modify(|_, w| w.eorsti().clear_bit());
+
+            for (index, endpoint) in self.endpoints.iter().enumerate() {
+                if !endpoint.is_allocated {
+                    continue;
+                }
+
+                self.set_current_endpoint(cs, index).unwrap();
+                usb.ueconx.modify(|_, w| w.epen().set_bit());
+
+                if usb.uecfg1x.read().alloc().bit_is_set() {
+                    continue;
+                }
+
+                usb.uecfg0x.write(|w| {
+                    w.epdir()
+                        .bit(endpoint.epdir_bit)
+                        .eptype()
+                        .bits(endpoint.eptype_bits)
+                });
+                usb.uecfg1x
+                    .write(|w| w.epbk().bits(0).epsize().bits(endpoint.epsize_bits));
+                usb.uecfg1x.modify(|_, w| w.alloc().set_bit());
+
+                assert!(
+                    usb.uesta0x.read().cfgok().bit_is_set(),
+                    "could not configure endpoint {}",
+                    index
+                );
+            }
+        })
     }
 
     fn set_device_address(&self, addr: u8) {
