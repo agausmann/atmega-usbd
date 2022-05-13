@@ -220,7 +220,7 @@ impl usb_device::bus::UsbBus for UsbBus {
             usb.udaddr.modify(|_, w| w.uadd().bits(addr));
             // NB: ADDEN and UADD shall not be written at the same time.
             usb.udaddr.modify(|_, w| w.adden().set_bit());
-        })
+        });
     }
 
     fn write(&self, ep_addr: EndpointAddress, buf: &[u8]) -> usb_device::Result<usize> {
@@ -299,12 +299,8 @@ impl usb_device::bus::UsbBus for UsbBus {
                 for slot in &mut buf[..bytes_to_read] {
                     *slot = usb.uedatx.read().bits();
                 }
-
-                if ueintx.rxstpi().bit_is_set() {
-                    usb.ueintx.clear_interrupts(|w| w.rxstpi().clear_bit());
-                } else if ueintx.rxouti().bit_is_set() {
-                    usb.ueintx.clear_interrupts(|w| w.rxouti().clear_bit());
-                }
+                usb.ueintx
+                    .clear_interrupts(|w| w.rxouti().clear_bit().rxstpi().clear_bit());
 
                 Ok(bytes_to_read)
             } else {
@@ -339,7 +335,7 @@ impl usb_device::bus::UsbBus for UsbBus {
                 usb.ueconx
                     .modify(|_, w| w.stallrq().bit(stalled).stallrqc().bit(!stalled));
             }
-        })
+        });
     }
 
     fn is_stalled(&self, ep_addr: EndpointAddress) -> bool {
@@ -363,7 +359,7 @@ impl usb_device::bus::UsbBus for UsbBus {
                 .modify(|_, w| w.wakeupe().set_bit().suspe().clear_bit());
             usb.usbcon.modify(|_, w| w.frzclk().set_bit());
             //TODO disable PLL
-        })
+        });
     }
 
     fn resume(&self) {
