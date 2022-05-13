@@ -9,6 +9,7 @@ use atmega_hal::pac::{
 use avr_device::interrupt::{self, CriticalSection, Mutex};
 use usb_device::{
     bus::PollResult,
+    class_prelude::UsbBusAllocator,
     endpoint::{EndpointAddress, EndpointType},
     UsbDirection, UsbError,
 };
@@ -64,13 +65,13 @@ pub struct UsbBus {
 }
 
 impl UsbBus {
-    pub fn new(usb: USB_DEVICE) -> Self {
-        Self {
+    pub fn new(usb: USB_DEVICE) -> UsbBusAllocator<Self> {
+        UsbBusAllocator::new(Self {
             usb: Mutex::new(usb),
             pending_ins: Mutex::new(Cell::new(0)),
             endpoints: Default::default(),
             dpram_usage: 0,
-        }
+        })
     }
 
     fn set_current_endpoint(&self, cs: &CriticalSection, index: usize) -> Result<(), UsbError> {
