@@ -3,6 +3,10 @@ name = "atmega-usbd"
 version = "0.1.0"
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
+avr-device = "0.3"
+usb-device = "0.2"
+
+[dependencies.atmega-hal]
+git = "https://github.com/Rahix/avr-hal.git"
+features = ["atmega32u4"]
