@@ -1,10 +1,14 @@
 #![no_std]
 
-use core::cmp::max;
+use core::{cell::Cell, cmp::max};
 
-use atmega_hal::pac::USB_DEVICE;
+use atmega_hal::pac::{
+    usb_device::{udint, ueintx, UDINT, UEINTX},
+    USB_DEVICE,
+};
 use avr_device::interrupt::{self, CriticalSection, Mutex};
 use usb_device::{
+    bus::PollResult,
     endpoint::{EndpointAddress, EndpointType},
     UsbDirection, UsbError,
 };
@@ -37,8 +41,24 @@ struct EndpointTableEntry {
     epsize_bits: u8,
 }
 
+impl EndpointTableEntry {
+    fn buffer_size(&self) -> usize {
+        match self.epsize_bits {
+            EP_SIZE_8 => 8,
+            EP_SIZE_16 => 16,
+            EP_SIZE_32 => 32,
+            EP_SIZE_64 => 64,
+            EP_SIZE_128 => 128,
+            EP_SIZE_256 => 256,
+            EP_SIZE_512 => 512,
+            _ => unreachable!(),
+        }
+    }
+}
+
 pub struct UsbBus {
     usb: Mutex<USB_DEVICE>,
+    pending_ins: Mutex<Cell<u8>>,
     endpoints: [EndpointTableEntry; MAX_ENDPOINTS],
     dpram_usage: u16,
 }
@@ -47,6 +67,7 @@ impl UsbBus {
     pub fn new(usb: USB_DEVICE) -> Self {
         Self {
             usb: Mutex::new(usb),
+            pending_ins: Mutex::new(Cell::new(0)),
             endpoints: Default::default(),
             dpram_usage: 0,
         }
@@ -61,6 +82,12 @@ impl UsbBus {
             .uenum
             .write(|w| unsafe { w.bits(index as u8) });
         Ok(())
+    }
+
+    fn endpoint_byte_count(&self, cs: &CriticalSection) -> u16 {
+        let usb = self.usb.borrow(cs);
+        // FIXME: Potential for desync here? LUFA doesn't seem to care.
+        ((usb.uebchx.read().bits() as u16) << 8) | (usb.uebclx.read().bits() as u16)
     }
 }
 
@@ -137,7 +164,8 @@ impl usb_device::bus::UsbBus for UsbBus {
             usb.uhwcon.modify(|_, w| w.uvrege().set_bit());
             usb.usbcon
                 .modify(|_, w| w.usbe().set_bit().otgpade().set_bit());
-            // NB: FRZCLK must be modified while USBE is set:
+            // NB: FRZCLK cannot be set/cleared when USBE=0, and
+            // cannot be modified at the same time.
             usb.usbcon.modify(|_, w| w.frzclk().clear_bit());
             usb.udcon.modify(|_, w| w.detach().clear_bit());
         });
@@ -180,34 +208,266 @@ impl usb_device::bus::UsbBus for UsbBus {
     }
 
     fn set_device_address(&self, addr: u8) {
-        todo!()
+        interrupt::free(|cs| {
+            let usb = self.usb.borrow(cs);
+            usb.udaddr.modify(|_, w| w.uadd().bits(addr));
+            // NB: ADDEN and UADD shall not be written at the same time.
+            usb.udaddr.modify(|_, w| w.adden().set_bit());
+        })
     }
 
     fn write(&self, ep_addr: EndpointAddress, buf: &[u8]) -> usb_device::Result<usize> {
-        todo!()
+        interrupt::free(|cs| {
+            let usb = self.usb.borrow(cs);
+            self.set_current_endpoint(cs, ep_addr.index())?;
+            let endpoint = &self.endpoints[ep_addr.index()];
+
+            // Different logic is needed for control endpoints:
+            // - The FIFOCON and RWAL fields are irrelevant with CONTROL endpoints.
+            // - TXINI ... shall be cleared by firmware to **send the
+            //   packet and to clear the endpoint bank.**
+            if endpoint.eptype_bits == EP_TYPE_CONTROL {
+                if usb.ueintx.read().txini().bit_is_clear() {
+                    return Err(UsbError::WouldBlock);
+                }
+
+                let buffer_size = endpoint.buffer_size();
+                if buf.len() > buffer_size {
+                    return Err(UsbError::BufferOverflow);
+                }
+
+                for &byte in buf {
+                    usb.uedatx.write(|w| unsafe { w.bits(byte) })
+                }
+
+                usb.ueintx.clear_interrupts(|w| w.txini().clear_bit());
+            } else {
+                if usb.ueintx.read().txini().bit_is_clear() {
+                    return Err(UsbError::WouldBlock);
+                }
+                //NB: RXOUTI serves as KILLBK for IN endpoints and needs to stay zero:
+                usb.ueintx
+                    .clear_interrupts(|w| w.txini().clear_bit().rxouti().clear_bit());
+
+                for &byte in buf {
+                    if usb.ueintx.read().rwal().bit_is_clear() {
+                        return Err(UsbError::BufferOverflow);
+                    }
+                    usb.uedatx.write(|w| unsafe { w.bits(byte) });
+                }
+
+                //NB: RXOUTI serves as KILLBK for IN endpoints and needs to stay zero:
+                usb.ueintx
+                    .clear_interrupts(|w| w.fifocon().clear_bit().rxouti().clear_bit());
+            }
+
+            let pending_ins = self.pending_ins.borrow(cs);
+            pending_ins.set(pending_ins.get() | 1 << ep_addr.index());
+
+            Ok(buf.len())
+        })
     }
 
     fn read(&self, ep_addr: EndpointAddress, buf: &mut [u8]) -> usb_device::Result<usize> {
-        todo!()
+        interrupt::free(|cs| {
+            let usb = self.usb.borrow(cs);
+            self.set_current_endpoint(cs, ep_addr.index())?;
+            let endpoint = &self.endpoints[ep_addr.index()];
+
+            // Different logic is needed for control endpoints:
+            // - The FIFOCON and RWAL fields are irrelevant with CONTROL endpoints.
+            // - RXSTPI/RXOUTI ... shall be cleared by firmware to **send the
+            //   packet and to clear the endpoint bank.**
+            if endpoint.eptype_bits == EP_TYPE_CONTROL {
+                let ueintx = usb.ueintx.read();
+                if ueintx.rxouti().bit_is_clear() && ueintx.rxstpi().bit_is_clear() {
+                    return Err(UsbError::WouldBlock);
+                }
+
+                let bytes_to_read = self.endpoint_byte_count(cs) as usize;
+                if bytes_to_read > buf.len() {
+                    return Err(UsbError::BufferOverflow);
+                }
+
+                for slot in &mut buf[..bytes_to_read] {
+                    *slot = usb.uedatx.read().bits();
+                }
+
+                if ueintx.rxstpi().bit_is_set() {
+                    usb.ueintx.clear_interrupts(|w| w.rxstpi().clear_bit());
+                } else if ueintx.rxouti().bit_is_set() {
+                    usb.ueintx.clear_interrupts(|w| w.rxouti().clear_bit());
+                }
+
+                Ok(bytes_to_read)
+            } else {
+                if usb.ueintx.read().rxouti().bit_is_clear() {
+                    return Err(UsbError::WouldBlock);
+                }
+                usb.ueintx.clear_interrupts(|w| w.rxouti().clear_bit());
+
+                let mut bytes_read = 0;
+                for slot in buf {
+                    if usb.ueintx.read().rwal().bit_is_clear() {
+                        break;
+                    }
+                    *slot = usb.uedatx.read().bits();
+                    bytes_read += 1;
+                }
+
+                if usb.ueintx.read().rwal().bit_is_set() {
+                    return Err(UsbError::BufferOverflow);
+                }
+
+                usb.ueintx.clear_interrupts(|w| w.fifocon().clear_bit());
+                Ok(bytes_read)
+            }
+        })
     }
 
     fn set_stalled(&self, ep_addr: EndpointAddress, stalled: bool) {
-        todo!()
+        interrupt::free(|cs| {
+            let usb = self.usb.borrow(cs);
+            if self.set_current_endpoint(cs, ep_addr.index()).is_ok() {
+                usb.ueconx
+                    .modify(|_, w| w.stallrq().bit(stalled).stallrqc().bit(!stalled));
+            }
+        })
     }
 
     fn is_stalled(&self, ep_addr: EndpointAddress) -> bool {
-        todo!()
+        interrupt::free(|cs| {
+            let usb = self.usb.borrow(cs);
+            if self.set_current_endpoint(cs, ep_addr.index()).is_ok() {
+                // NB: The datasheet says STALLRQ is write-only but LUFA reads from it...
+                usb.ueconx.read().stallrq().bit_is_set()
+            } else {
+                false
+            }
+        })
     }
 
     fn suspend(&self) {
-        todo!()
+        interrupt::free(|cs| {
+            let usb = self.usb.borrow(cs);
+            usb.udint
+                .clear_interrupts(|w| w.suspi().clear_bit().wakeupi().clear_bit());
+            usb.udien
+                .modify(|_, w| w.wakeupe().set_bit().suspe().clear_bit());
+            usb.usbcon.modify(|_, w| w.frzclk().set_bit());
+            //TODO disable PLL
+        })
     }
 
     fn resume(&self) {
-        todo!()
+        interrupt::free(|cs| {
+            let usb = self.usb.borrow(cs);
+            //TODO enable PLL
+            usb.usbcon.modify(|_, w| w.frzclk().clear_bit());
+            usb.udint
+                .clear_interrupts(|w| w.wakeupi().clear_bit().suspi().clear_bit());
+            usb.udien
+                .modify(|_, w| w.wakeupe().clear_bit().suspe().set_bit());
+        });
     }
 
-    fn poll(&self) -> usb_device::bus::PollResult {
-        todo!()
+    fn poll(&self) -> PollResult {
+        interrupt::free(|cs| {
+            let usb = self.usb.borrow(cs);
+
+            let udint = usb.udint.read();
+            let udien = usb.udien.read();
+            if udint.suspi().bit_is_set() && udien.suspe().bit_is_set() {
+                return PollResult::Suspend;
+            }
+            if udint.wakeupi().bit_is_set() && udien.wakeupe().bit_is_set() {
+                return PollResult::Resume;
+            }
+            if udint.eorsti().bit_is_set() {
+                return PollResult::Reset;
+            }
+
+            let mut ep_out = 0u8;
+            let mut ep_setup = 0u8;
+            let mut ep_in_complete = 0u8;
+            let pending_ins = self.pending_ins.borrow(cs);
+
+            for (index, endpoint) in self.endpoints.iter().enumerate() {
+                if !endpoint.is_allocated {
+                    continue;
+                }
+                self.set_current_endpoint(cs, index).unwrap();
+
+                let ueintx = usb.ueintx.read();
+                if ueintx.rxouti().bit_is_set() {
+                    ep_out |= 1 << index;
+                }
+                if ueintx.rxstpi().bit_is_set() {
+                    ep_setup |= 1 << index;
+                }
+                if pending_ins.get() & (1 << index) != 0 && ueintx.txini().bit_is_set() {
+                    ep_in_complete |= 1 << index;
+                    pending_ins.set(pending_ins.get() & !(1 << index));
+                }
+            }
+            if ep_out | ep_setup | ep_in_complete != 0 {
+                return PollResult::Data {
+                    ep_out: ep_out as u16,
+                    ep_in_complete: ep_in_complete as u16,
+                    ep_setup: ep_setup as u16,
+                };
+            }
+
+            PollResult::None
+        })
+    }
+}
+
+/// Extension trait for conveniently clearing AVR interrupt flag registers.
+///
+/// To clear an interrupt flag, a zero bit must be written. However, there are
+/// several other hazards to take into consideration:
+///
+/// 1. If you read-modify-write, it is possible that an interrupt flag will be
+///   set by hardware in between the read and write, and writing the zero that
+///   you previously read will clear that flag as well. So, use a default value
+///   of all ones and specifically clear the bits you want. HOWEVER:
+///
+/// 2. Some bits of the interrupt flag register are reserved, and it is
+///   specified that they should not be written as ones.
+///
+/// Implementers of this trait should provide an initial value to the callback
+/// with all _known_ interrupt flags set to the value that has no effect (which
+/// is 1, in most cases)
+trait ClearInterrupts {
+    type Writer;
+
+    fn clear_interrupts<F>(&self, f: F)
+    where
+        for<'w> F: FnOnce(&mut Self::Writer) -> &mut Self::Writer;
+}
+
+impl ClearInterrupts for UDINT {
+    type Writer = udint::W;
+
+    fn clear_interrupts<F>(&self, f: F)
+    where
+        for<'w> F: FnOnce(&mut Self::Writer) -> &mut Self::Writer,
+    {
+        // Bits 1,7 reserved as do not set. Setting all other bits has no effect
+        self.write(|w| f(unsafe { w.bits(0x7d) }))
+    }
+}
+
+impl ClearInterrupts for UEINTX {
+    type Writer = ueintx::W;
+
+    fn clear_interrupts<F>(&self, f: F)
+    where
+        for<'w> F: FnOnce(&mut Self::Writer) -> &mut Self::Writer,
+    {
+        // Bit 5 read-only. Setting all other bits has no effect, EXCEPT:
+        //  - RXOUTI/KILLBK should not be set for "IN" endpoints (XXX end-user beware)
+        self.write(|w| f(unsafe { w.bits(0xdf) }))
     }
 }

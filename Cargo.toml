@@ -10,3 +10,11 @@ usb-device = "0.2"
 [dependencies.atmega-hal]
 git = "https://github.com/Rahix/avr-hal.git"
 features = ["atmega32u4"]
+
+[profile.dev]
+opt-level = "s"
+lto = true
+
+[profile.release]
+opt-level = "s"
+lto = true
