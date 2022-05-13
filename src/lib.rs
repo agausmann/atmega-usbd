@@ -116,6 +116,7 @@ impl usb_device::bus::UsbBus for UsbBus {
                     .endpoints
                     .iter()
                     .enumerate()
+                    .skip(1)
                     .find_map(|(index, ep)| {
                         if !ep.is_allocated && max_packet_size <= ENDPOINT_MAX_BUFSIZE[index] {
                             Some(index)
