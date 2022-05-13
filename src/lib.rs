@@ -205,6 +205,11 @@ impl usb_device::bus::UsbBus for UsbBus {
                     index
                 );
             }
+
+            usb.udint
+                .clear_interrupts(|w| w.wakeupi().clear_bit().suspi().clear_bit());
+            usb.udien
+                .modify(|_, w| w.wakeupe().clear_bit().suspe().set_bit());
         })
     }
 
