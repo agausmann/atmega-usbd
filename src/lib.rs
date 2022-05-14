@@ -3,7 +3,7 @@
 use core::{cell::Cell, cmp::max};
 
 use avr_device::atmega32u4::{
-    usb_device::{udint, ueintx, UDINT, UEINTX},
+    usb_device::{udint, ueintx, usbint, UDINT, UEINTX, USBINT},
     USB_DEVICE,
 };
 use avr_device::interrupt::{self, CriticalSection, Mutex};
@@ -168,7 +168,8 @@ impl usb_device::bus::UsbBus for UsbBus {
                 .modify(|_, w| w.usbe().set_bit().otgpade().set_bit());
             // NB: FRZCLK cannot be set/cleared when USBE=0, and
             // cannot be modified at the same time.
-            usb.usbcon.modify(|_, w| w.frzclk().clear_bit());
+            usb.usbcon
+                .modify(|_, w| w.frzclk().clear_bit().vbuste().set_bit());
             usb.udcon.modify(|_, w| w.detach().clear_bit());
             usb.udien.modify(|_, w| w.eorste().set_bit());
         });
@@ -379,8 +380,17 @@ impl usb_device::bus::UsbBus for UsbBus {
         interrupt::free(|cs| {
             let usb = self.usb.borrow(cs);
 
+            let usbint = usb.usbint.read();
             let udint = usb.udint.read();
             let udien = usb.udien.read();
+            if usbint.vbusti().bit_is_set() {
+                usb.usbint.clear_interrupts(|w| w.vbusti().clear_bit());
+                if usb.usbsta.read().vbus().bit_is_set() {
+                    return PollResult::Resume;
+                } else {
+                    return PollResult::Suspend;
+                }
+            }
             if udint.suspi().bit_is_set() && udien.suspe().bit_is_set() {
                 return PollResult::Suspend;
             }
@@ -473,5 +483,17 @@ impl ClearInterrupts for UEINTX {
         // Bit 5 read-only. Setting all other bits has no effect, EXCEPT:
         //  - RXOUTI/KILLBK should not be set for "IN" endpoints (XXX end-user beware)
         self.write(|w| f(unsafe { w.bits(0xdf) }))
+    }
+}
+
+impl ClearInterrupts for USBINT {
+    type Writer = usbint::W;
+
+    fn clear_interrupts<F>(&self, f: F)
+    where
+        for<'w> F: FnOnce(&mut Self::Writer) -> &mut Self::Writer,
+    {
+        // Bits 7:1 are reserved as do not set.
+        self.write(|w| f(unsafe { w.bits(0x01) }))
     }
 }
