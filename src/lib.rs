@@ -170,6 +170,7 @@ impl usb_device::bus::UsbBus for UsbBus {
             // cannot be modified at the same time.
             usb.usbcon.modify(|_, w| w.frzclk().clear_bit());
             usb.udcon.modify(|_, w| w.detach().clear_bit());
+            usb.udien.modify(|_, w| w.eorste().set_bit());
         });
     }
 
