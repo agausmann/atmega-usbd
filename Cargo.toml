@@ -4,12 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-avr-device = "0.3"
+avr-device = { version = "0.3", features = ["atmega32u4"] }
 usb-device = "0.2"
-
-[dependencies.atmega-hal]
-git = "https://github.com/Rahix/avr-hal.git"
-features = ["atmega32u4"]
 
 [profile.dev]
 opt-level = "s"

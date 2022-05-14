@@ -2,7 +2,7 @@
 
 use core::{cell::Cell, cmp::max};
 
-use atmega_hal::pac::{
+use avr_device::atmega32u4::{
     usb_device::{udint, ueintx, UDINT, UEINTX},
     USB_DEVICE,
 };
