@@ -74,6 +74,13 @@ impl UsbBus {
         })
     }
 
+    fn active_endpoints(&self) -> impl Iterator<Item = (usize, &EndpointTableEntry)> {
+        self.endpoints
+            .iter()
+            .enumerate()
+            .filter(|&(_, ep)| ep.is_allocated)
+    }
+
     fn set_current_endpoint(&self, cs: &CriticalSection, index: usize) -> Result<(), UsbError> {
         if index >= MAX_ENDPOINTS {
             return Err(UsbError::InvalidEndpoint);
@@ -171,11 +178,7 @@ impl usb_device::bus::UsbBus for UsbBus {
             usb.usbcon
                 .modify(|_, w| w.frzclk().clear_bit().vbuste().set_bit());
 
-            for (index, endpoint) in self.endpoints.iter().enumerate() {
-                if !endpoint.is_allocated {
-                    continue;
-                }
-
+            for (index, endpoint) in self.active_endpoints() {
                 self.set_current_endpoint(cs, index).unwrap();
                 usb.ueconx.modify(|_, w| w.epen().set_bit());
 
@@ -206,11 +209,7 @@ impl usb_device::bus::UsbBus for UsbBus {
             let usb = self.usb.borrow(cs);
             usb.udint.modify(|_, w| w.eorsti().clear_bit());
 
-            for (index, endpoint) in self.endpoints.iter().enumerate() {
-                if !endpoint.is_allocated {
-                    continue;
-                }
-
+            for (index, _ep) in self.active_endpoints() {
                 self.set_current_endpoint(cs, index).unwrap();
                 usb.ueconx.modify(|_, w| w.epen().set_bit());
             }
@@ -412,10 +411,7 @@ impl usb_device::bus::UsbBus for UsbBus {
             let mut ep_in_complete = 0u8;
             let pending_ins = self.pending_ins.borrow(cs);
 
-            for (index, endpoint) in self.endpoints.iter().enumerate() {
-                if !endpoint.is_allocated {
-                    continue;
-                }
+            for (index, _ep) in self.active_endpoints() {
                 self.set_current_endpoint(cs, index).unwrap();
 
                 let ueintx = usb.ueintx.read();
