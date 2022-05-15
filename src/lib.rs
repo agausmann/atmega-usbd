@@ -170,6 +170,32 @@ impl usb_device::bus::UsbBus for UsbBus {
             // cannot be modified at the same time.
             usb.usbcon
                 .modify(|_, w| w.frzclk().clear_bit().vbuste().set_bit());
+
+            for (index, endpoint) in self.endpoints.iter().enumerate() {
+                if !endpoint.is_allocated {
+                    continue;
+                }
+
+                self.set_current_endpoint(cs, index).unwrap();
+                usb.ueconx.modify(|_, w| w.epen().set_bit());
+
+                usb.uecfg0x.write(|w| {
+                    w.epdir()
+                        .bit(endpoint.epdir_bit)
+                        .eptype()
+                        .bits(endpoint.eptype_bits)
+                });
+                usb.uecfg1x
+                    .write(|w| w.epbk().bits(0).epsize().bits(endpoint.epsize_bits));
+                usb.uecfg1x.modify(|_, w| w.alloc().set_bit());
+
+                assert!(
+                    usb.uesta0x.read().cfgok().bit_is_set(),
+                    "could not configure endpoint {}",
+                    index
+                );
+            }
+
             usb.udcon.modify(|_, w| w.detach().clear_bit());
             usb.udien.modify(|_, w| w.eorste().set_bit());
         });
@@ -187,26 +213,6 @@ impl usb_device::bus::UsbBus for UsbBus {
 
                 self.set_current_endpoint(cs, index).unwrap();
                 usb.ueconx.modify(|_, w| w.epen().set_bit());
-
-                if usb.uecfg1x.read().alloc().bit_is_set() {
-                    continue;
-                }
-
-                usb.uecfg0x.write(|w| {
-                    w.epdir()
-                        .bit(endpoint.epdir_bit)
-                        .eptype()
-                        .bits(endpoint.eptype_bits)
-                });
-                usb.uecfg1x
-                    .write(|w| w.epbk().bits(0).epsize().bits(endpoint.epsize_bits));
-                usb.uecfg1x.modify(|_, w| w.alloc().set_bit());
-
-                assert!(
-                    usb.uesta0x.read().cfgok().bit_is_set(),
-                    "could not configure endpoint {}",
-                    index
-                );
             }
 
             usb.udint
