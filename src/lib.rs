@@ -74,6 +74,13 @@ impl UsbBus {
         })
     }
 
+    fn active_endpoints(&self) -> impl Iterator<Item = (usize, &EndpointTableEntry)> {
+        self.endpoints
+            .iter()
+            .enumerate()
+            .filter(|&(_, ep)| ep.is_allocated)
+    }
+
     fn set_current_endpoint(&self, cs: &CriticalSection, index: usize) -> Result<(), UsbError> {
         if index >= MAX_ENDPOINTS {
             return Err(UsbError::InvalidEndpoint);
@@ -82,6 +89,35 @@ impl UsbBus {
             .borrow(cs)
             .uenum
             .write(|w| unsafe { w.bits(index as u8) });
+        Ok(())
+    }
+
+    fn configure_endpoint(&self, cs: &CriticalSection, index: usize) -> Result<(), UsbError> {
+        let usb = self.usb.borrow(cs);
+        self.set_current_endpoint(cs, index)?;
+        let endpoint = &self.endpoints[index];
+
+        usb.ueconx.modify(|_, w| w.epen().clear_bit());
+        usb.uecfg1x.modify(|_, w| w.alloc().clear_bit());
+
+        usb.ueconx.modify(|_, w| w.epen().set_bit());
+
+        usb.uecfg0x.write(|w| {
+            w.epdir()
+                .bit(endpoint.epdir_bit)
+                .eptype()
+                .bits(endpoint.eptype_bits)
+        });
+        usb.uecfg1x
+            .write(|w| w.epbk().bits(0).epsize().bits(endpoint.epsize_bits));
+        usb.uecfg1x.modify(|_, w| w.alloc().set_bit());
+
+        assert!(
+            usb.uesta0x.read().cfgok().bit_is_set(),
+            "could not configure endpoint {}",
+            index
+        );
+
         Ok(())
     }
 
@@ -171,29 +207,8 @@ impl usb_device::bus::UsbBus for UsbBus {
             usb.usbcon
                 .modify(|_, w| w.frzclk().clear_bit().vbuste().set_bit());
 
-            for (index, endpoint) in self.endpoints.iter().enumerate() {
-                if !endpoint.is_allocated {
-                    continue;
-                }
-
-                self.set_current_endpoint(cs, index).unwrap();
-                usb.ueconx.modify(|_, w| w.epen().set_bit());
-
-                usb.uecfg0x.write(|w| {
-                    w.epdir()
-                        .bit(endpoint.epdir_bit)
-                        .eptype()
-                        .bits(endpoint.eptype_bits)
-                });
-                usb.uecfg1x
-                    .write(|w| w.epbk().bits(0).epsize().bits(endpoint.epsize_bits));
-                usb.uecfg1x.modify(|_, w| w.alloc().set_bit());
-
-                assert!(
-                    usb.uesta0x.read().cfgok().bit_is_set(),
-                    "could not configure endpoint {}",
-                    index
-                );
+            for (index, _ep) in self.active_endpoints() {
+                self.configure_endpoint(cs, index).unwrap();
             }
 
             usb.udcon.modify(|_, w| w.detach().clear_bit());
@@ -205,15 +220,6 @@ impl usb_device::bus::UsbBus for UsbBus {
         interrupt::free(|cs| {
             let usb = self.usb.borrow(cs);
             usb.udint.modify(|_, w| w.eorsti().clear_bit());
-
-            for (index, endpoint) in self.endpoints.iter().enumerate() {
-                if !endpoint.is_allocated {
-                    continue;
-                }
-
-                self.set_current_endpoint(cs, index).unwrap();
-                usb.ueconx.modify(|_, w| w.epen().set_bit());
-            }
 
             usb.udint
                 .clear_interrupts(|w| w.wakeupi().clear_bit().suspi().clear_bit());
@@ -412,10 +418,7 @@ impl usb_device::bus::UsbBus for UsbBus {
             let mut ep_in_complete = 0u8;
             let pending_ins = self.pending_ins.borrow(cs);
 
-            for (index, endpoint) in self.endpoints.iter().enumerate() {
-                if !endpoint.is_allocated {
-                    continue;
-                }
+            for (index, _ep) in self.active_endpoints() {
                 self.set_current_endpoint(cs, index).unwrap();
 
                 let ueintx = usb.ueintx.read();
