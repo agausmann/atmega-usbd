@@ -125,6 +125,9 @@ impl UsbBus {
             "could not configure endpoint {}",
             index
         );
+
+        usb.ueienx
+            .modify(|_, w| w.rxoute().set_bit().rxstpe().set_bit());
         Ok(())
     }
 }
@@ -213,7 +216,8 @@ impl usb_device::bus::UsbBus for UsbBus {
             }
 
             usb.udcon.modify(|_, w| w.detach().clear_bit());
-            usb.udien.modify(|_, w| w.eorste().set_bit());
+            usb.udien
+                .modify(|_, w| w.eorste().set_bit().sofe().set_bit());
         });
     }
 
@@ -416,6 +420,9 @@ impl usb_device::bus::UsbBus for UsbBus {
             }
             if udint.eorsti().bit_is_set() {
                 return PollResult::Reset;
+            }
+            if udint.sofi().bit_is_set() {
+                usb.udint.clear_interrupts(|w| w.sofi().clear_bit());
             }
 
             // Can only query endpoints while clock is running
