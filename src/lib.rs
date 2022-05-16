@@ -85,10 +85,11 @@ impl UsbBus {
         if index >= MAX_ENDPOINTS {
             return Err(UsbError::InvalidEndpoint);
         }
-        self.usb
-            .borrow(cs)
-            .uenum
-            .write(|w| unsafe { w.bits(index as u8) });
+        let usb = self.usb.borrow(cs);
+        if usb.usbcon.read().frzclk().bit_is_set() {
+            return Err(UsbError::InvalidState);
+        }
+        usb.uenum.write(|w| unsafe { w.bits(index as u8) });
         Ok(())
     }
 
@@ -406,32 +407,36 @@ impl usb_device::bus::UsbBus for UsbBus {
                 return PollResult::Reset;
             }
 
-            let mut ep_out = 0u8;
-            let mut ep_setup = 0u8;
-            let mut ep_in_complete = 0u8;
-            let pending_ins = self.pending_ins.borrow(cs);
+            // Can only query endpoints while clock is running
+            // (e.g. not in suspend state)
+            if usb.usbcon.read().frzclk().bit_is_clear() {
+                let mut ep_out = 0u8;
+                let mut ep_setup = 0u8;
+                let mut ep_in_complete = 0u8;
+                let pending_ins = self.pending_ins.borrow(cs);
 
-            for (index, _ep) in self.active_endpoints() {
-                self.set_current_endpoint(cs, index).unwrap();
+                for (index, _ep) in self.active_endpoints() {
+                    self.set_current_endpoint(cs, index).unwrap();
 
-                let ueintx = usb.ueintx.read();
-                if ueintx.rxouti().bit_is_set() {
-                    ep_out |= 1 << index;
+                    let ueintx = usb.ueintx.read();
+                    if ueintx.rxouti().bit_is_set() {
+                        ep_out |= 1 << index;
+                    }
+                    if ueintx.rxstpi().bit_is_set() {
+                        ep_setup |= 1 << index;
+                    }
+                    if pending_ins.get() & (1 << index) != 0 && ueintx.txini().bit_is_set() {
+                        ep_in_complete |= 1 << index;
+                        pending_ins.set(pending_ins.get() & !(1 << index));
+                    }
                 }
-                if ueintx.rxstpi().bit_is_set() {
-                    ep_setup |= 1 << index;
+                if ep_out | ep_setup | ep_in_complete != 0 {
+                    return PollResult::Data {
+                        ep_out: ep_out as u16,
+                        ep_in_complete: ep_in_complete as u16,
+                        ep_setup: ep_setup as u16,
+                    };
                 }
-                if pending_ins.get() & (1 << index) != 0 && ueintx.txini().bit_is_set() {
-                    ep_in_complete |= 1 << index;
-                    pending_ins.set(pending_ins.get() & !(1 << index));
-                }
-            }
-            if ep_out | ep_setup | ep_in_complete != 0 {
-                return PollResult::Data {
-                    ep_out: ep_out as u16,
-                    ep_in_complete: ep_in_complete as u16,
-                    ep_setup: ep_setup as u16,
-                };
             }
 
             PollResult::None
