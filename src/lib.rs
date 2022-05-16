@@ -90,6 +90,9 @@ impl UsbBus {
             return Err(UsbError::InvalidState);
         }
         usb.uenum.write(|w| unsafe { w.bits(index as u8) });
+        if usb.uenum.read().bits() & 0b111 != (index as u8) {
+            return Err(UsbError::InvalidState);
+        }
         Ok(())
     }
 
@@ -424,7 +427,10 @@ impl usb_device::bus::UsbBus for UsbBus {
                 let pending_ins = self.pending_ins.borrow(cs);
 
                 for (index, _ep) in self.active_endpoints() {
-                    self.set_current_endpoint(cs, index).unwrap();
+                    if self.set_current_endpoint(cs, index).is_err() {
+                        // Endpoint selection has stopped working...
+                        break;
+                    }
 
                     let ueintx = usb.ueintx.read();
                     if ueintx.rxouti().bit_is_set() {
