@@ -5,26 +5,33 @@
 
 mod std_stub;
 
-use arduino_hal::{pins, Peripherals};
+use arduino_hal::{
+    entry, pins,
+    port::{
+        mode::{Input, Output, PullUp},
+        Pin,
+    },
+    Peripherals,
+};
 use atmega_usbd::UsbBus;
-use usb_device::device::{UsbDeviceBuilder, UsbVidPid};
+use avr_device::{asm::sleep, interrupt};
+use usb_device::{
+    class_prelude::UsbBusAllocator,
+    device::{UsbDevice, UsbDeviceBuilder, UsbVidPid},
+};
 use usbd_hid::{
     descriptor::{KeyboardReport, SerializedDescriptor},
     hid_class::HIDClass,
 };
 
-#[no_mangle]
-pub extern "C" fn main() {
-    main_inner();
-}
-
-fn main_inner() {
+#[entry]
+fn main() -> ! {
     let dp = Peripherals::take().unwrap();
     let pins = pins!(dp);
     let pll = dp.PLL;
     let usb = dp.USB_DEVICE;
 
-    let mut status = pins.d13.into_output();
+    let status = pins.d13.into_output();
     let trigger = pins.d2.into_pull_up_input();
 
     // Configure PLL interface
@@ -40,53 +47,30 @@ fn main_inner() {
     // Check PLL lock
     while pll.pllcsr.read().plock().bit_is_clear() {}
 
-    let usb_bus = UsbBus::new(usb);
-    let mut hid_class = HIDClass::new(&usb_bus, KeyboardReport::desc(), 1);
-    let mut usb_device = UsbDeviceBuilder::new(&usb_bus, UsbVidPid(0x1209, 0x0001))
+    let usb_bus = unsafe {
+        static mut USB_BUS: Option<UsbBusAllocator<UsbBus>> = None;
+        &*USB_BUS.insert(UsbBus::new(usb))
+    };
+
+    let hid_class = HIDClass::new(&usb_bus, KeyboardReport::desc(), 1);
+    let usb_device = UsbDeviceBuilder::new(&usb_bus, UsbVidPid(0x1209, 0x0001))
         .manufacturer("Foo")
         .product("Bar")
         .build();
 
-    let mut report_buf = [0u8; 1];
-    let mut index = 0;
+    unsafe {
+        USB_CTX = Some(UsbContext {
+            usb_device,
+            hid_class,
+            current_index: 0,
+            indicator: status.downgrade(),
+            trigger: trigger.downgrade(),
+        });
+    }
 
+    unsafe { interrupt::enable() };
     loop {
-        if trigger.is_low() {
-            if let Some(report) = PAYLOAD.get(index).copied().and_then(ascii_to_report) {
-                if hid_class.push_input(&report).is_ok() {
-                    index += 1;
-                }
-            } else {
-                hid_class
-                    .push_input(&KeyboardReport {
-                        modifier: 0,
-                        reserved: 0,
-                        leds: 0,
-                        keycodes: [0; 6],
-                    })
-                    .ok();
-            }
-        } else {
-            index = 0;
-            hid_class
-                .push_input(&KeyboardReport {
-                    modifier: 0,
-                    reserved: 0,
-                    leds: 0,
-                    keycodes: [0; 6],
-                })
-                .ok();
-        }
-
-        if usb_device.poll(&mut [&mut hid_class]) {
-            if hid_class.pull_raw_output(&mut report_buf).is_ok() {
-                if report_buf[0] & 2 != 0 {
-                    status.set_high();
-                } else {
-                    status.set_low();
-                }
-            }
-        }
+        sleep();
     }
 }
 
@@ -108,4 +92,73 @@ fn ascii_to_report(c: u8) -> Option<KeyboardReport> {
         leds: 0,
         keycodes: [keycode, 0, 0, 0, 0, 0],
     })
+}
+
+struct UsbContext {
+    usb_device: UsbDevice<'static, UsbBus>,
+    hid_class: HIDClass<'static, UsbBus>,
+    current_index: usize,
+    indicator: Pin<Output>,
+    trigger: Pin<Input<PullUp>>,
+}
+
+impl UsbContext {
+    fn poll(&mut self) {
+        if self.trigger.is_low() {
+            if let Some(report) = PAYLOAD
+                .get(self.current_index)
+                .copied()
+                .and_then(ascii_to_report)
+            {
+                if self.hid_class.push_input(&report).is_ok() {
+                    self.current_index += 1;
+                }
+            } else {
+                self.hid_class
+                    .push_input(&KeyboardReport {
+                        modifier: 0,
+                        reserved: 0,
+                        leds: 0,
+                        keycodes: [0; 6],
+                    })
+                    .ok();
+            }
+        } else {
+            self.current_index = 0;
+            self.hid_class
+                .push_input(&KeyboardReport {
+                    modifier: 0,
+                    reserved: 0,
+                    leds: 0,
+                    keycodes: [0; 6],
+                })
+                .ok();
+        }
+
+        if self.usb_device.poll(&mut [&mut self.hid_class]) {
+            let mut report_buf = [0u8; 1];
+
+            if self.hid_class.pull_raw_output(&mut report_buf).is_ok() {
+                if report_buf[0] & 2 != 0 {
+                    self.indicator.set_high();
+                } else {
+                    self.indicator.set_low();
+                }
+            }
+        }
+    }
+}
+
+static mut USB_CTX: Option<UsbContext> = None;
+
+#[interrupt(atmega32u4)]
+fn USB_GEN() {
+    let ctx = unsafe { USB_CTX.as_mut().unwrap() };
+    ctx.poll();
+}
+
+#[interrupt(atmega32u4)]
+fn USB_COM() {
+    let ctx = unsafe { USB_CTX.as_mut().unwrap() };
+    ctx.poll();
 }
