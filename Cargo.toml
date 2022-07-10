@@ -7,6 +7,14 @@ edition = "2021"
 avr-device = { version = "0.3", features = ["atmega32u4"] }
 usb-device = "0.2"
 
+[dev-dependencies]
+usbd-hid = "0.6"
+
+[dev-dependencies.arduino-hal]
+git = "https://github.com/Rahix/avr-hal.git"
+branch = "main"
+features = ["arduino-leonardo"]
+
 [profile.dev]
 opt-level = "s"
 lto = true
