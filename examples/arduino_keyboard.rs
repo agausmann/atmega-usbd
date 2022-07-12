@@ -2,6 +2,7 @@
 #![cfg_attr(not(test), no_main)]
 #![feature(lang_items)]
 #![feature(abi_avr_interrupt)]
+#![deny(unsafe_op_in_unsafe_fn)]
 
 mod std_stub;
 
@@ -23,6 +24,8 @@ use usbd_hid::{
     descriptor::{KeyboardReport, SerializedDescriptor},
     hid_class::HIDClass,
 };
+
+const PAYLOAD: &[u8] = b"Hello World";
 
 #[entry]
 fn main() -> ! {
@@ -74,24 +77,34 @@ fn main() -> ! {
     }
 }
 
-const PAYLOAD: &[u8] = b"Hello World";
+static mut USB_CTX: Option<UsbContext> = None;
 
-fn ascii_to_report(c: u8) -> Option<KeyboardReport> {
-    let (keycode, shift) = if c.is_ascii_alphabetic() {
-        (c.to_ascii_lowercase() - b'a' + 0x04, c.is_ascii_uppercase())
-    } else {
-        match c {
-            b' ' => (0x2c, false),
-            _ => return None,
-        }
-    };
+#[interrupt(atmega32u4)]
+fn USB_GEN() {
+    unsafe { usb_poll() };
+}
 
-    Some(KeyboardReport {
-        modifier: if shift { 2 } else { 0 },
-        reserved: 0,
-        leds: 0,
-        keycodes: [keycode, 0, 0, 0, 0, 0],
-    })
+#[interrupt(atmega32u4)]
+fn USB_COM() {
+    unsafe { poll_usb() };
+}
+
+/// # Safety
+///
+/// This function assumes that it is being called within an
+/// interrupt context.
+unsafe fn poll_usb() {
+    // Safety: There must be no other overlapping accesses to USB_CTX.
+    // - By the safety contract of this function, we are in an interrupt
+    //   context.
+    // - The main thread is not accessing USB_CTX. The only other access
+    //   is the assignment during initialization. It cannot overlap because
+    //   it is before the call to `interrupt::enable()`.
+    // - No other interrupts are accessing USB_CTX. Interrupts cannot
+    //   preempt each other on AVR, so this is the only interrupt that is
+    //   in the middle of execution.
+    let ctx = unsafe { USB_CTX.as_mut().unwrap() };
+    ctx.poll();
 }
 
 struct UsbContext {
@@ -114,25 +127,11 @@ impl UsbContext {
                     self.current_index += 1;
                 }
             } else {
-                self.hid_class
-                    .push_input(&KeyboardReport {
-                        modifier: 0,
-                        reserved: 0,
-                        leds: 0,
-                        keycodes: [0; 6],
-                    })
-                    .ok();
+                self.hid_class.push_input(&BLANK_REPORT).ok();
             }
         } else {
             self.current_index = 0;
-            self.hid_class
-                .push_input(&KeyboardReport {
-                    modifier: 0,
-                    reserved: 0,
-                    leds: 0,
-                    keycodes: [0; 6],
-                })
-                .ok();
+            self.hid_class.push_input(&BLANK_REPORT).ok();
         }
 
         if self.usb_device.poll(&mut [&mut self.hid_class]) {
@@ -149,16 +148,27 @@ impl UsbContext {
     }
 }
 
-static mut USB_CTX: Option<UsbContext> = None;
+const BLANK_REPORT: KeyboardReport = KeyboardReport {
+    modifier: 0,
+    reserved: 0,
+    leds: 0,
+    keycodes: [0; 6],
+};
 
-#[interrupt(atmega32u4)]
-fn USB_GEN() {
-    let ctx = unsafe { USB_CTX.as_mut().unwrap() };
-    ctx.poll();
-}
-
-#[interrupt(atmega32u4)]
-fn USB_COM() {
-    let ctx = unsafe { USB_CTX.as_mut().unwrap() };
-    ctx.poll();
+fn ascii_to_report(c: u8) -> Option<KeyboardReport> {
+    let (keycode, shift) = if c.is_ascii_alphabetic() {
+        (c.to_ascii_lowercase() - b'a' + 0x04, c.is_ascii_uppercase())
+    } else {
+        match c {
+            b' ' => (0x2c, false),
+            _ => return None,
+        }
+    };
+    
+    let mut report = BLANK_REPORT;
+    if shift {
+        report.modifier |= 0x2;
+    }
+    report.keycodes[0] = keycode;
+    Some(report)
 }
