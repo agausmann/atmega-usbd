@@ -81,7 +81,7 @@ static mut USB_CTX: Option<UsbContext> = None;
 
 #[interrupt(atmega32u4)]
 fn USB_GEN() {
-    unsafe { usb_poll() };
+    unsafe { poll_usb() };
 }
 
 #[interrupt(atmega32u4)]
@@ -94,15 +94,15 @@ fn USB_COM() {
 /// This function assumes that it is being called within an
 /// interrupt context.
 unsafe fn poll_usb() {
-    // Safety: There must be no other overlapping accesses to USB_CTX.
+    // Safety: There must be no other overlapping borrows of USB_CTX.
     // - By the safety contract of this function, we are in an interrupt
     //   context.
-    // - The main thread is not accessing USB_CTX. The only other access
-    //   is the assignment during initialization. It cannot overlap because
-    //   it is before the call to `interrupt::enable()`.
-    // - No other interrupts are accessing USB_CTX. Interrupts cannot
-    //   preempt each other on AVR, so this is the only interrupt that is
-    //   in the middle of execution.
+    // - The main thread is not borrowing USB_CTX. The only access is the
+    //   assignment during initialization. It cannot overlap because it is
+    //   before the call to `interrupt::enable()`.
+    // - No other interrupts are accessing USB_CTX, because no other interrupts
+    //   are in the middle of execution. GIE is automatically cleared for the
+    //   duration of the interrupt, and is not re-enabled within any ISRs.
     let ctx = unsafe { USB_CTX.as_mut().unwrap() };
     ctx.poll();
 }
@@ -164,7 +164,7 @@ fn ascii_to_report(c: u8) -> Option<KeyboardReport> {
             _ => return None,
         }
     };
-    
+
     let mut report = BLANK_REPORT;
     if shift {
         report.modifier |= 0x2;
