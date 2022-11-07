@@ -81,7 +81,7 @@ impl UsbBus {
             .filter(|&(_, ep)| ep.is_allocated)
     }
 
-    fn set_current_endpoint(&self, cs: &CriticalSection, index: usize) -> Result<(), UsbError> {
+    fn set_current_endpoint(&self, cs: CriticalSection, index: usize) -> Result<(), UsbError> {
         if index >= MAX_ENDPOINTS {
             return Err(UsbError::InvalidEndpoint);
         }
@@ -96,13 +96,13 @@ impl UsbBus {
         Ok(())
     }
 
-    fn endpoint_byte_count(&self, cs: &CriticalSection) -> u16 {
+    fn endpoint_byte_count(&self, cs: CriticalSection) -> u16 {
         let usb = self.usb.borrow(cs);
         // FIXME: Potential for desync here? LUFA doesn't seem to care.
         ((usb.uebchx.read().bits() as u16) << 8) | (usb.uebclx.read().bits() as u16)
     }
 
-    fn configure_endpoint(&self, cs: &CriticalSection, index: usize) -> Result<(), UsbError> {
+    fn configure_endpoint(&self, cs: CriticalSection, index: usize) -> Result<(), UsbError> {
         let usb = self.usb.borrow(cs);
         self.set_current_endpoint(cs, index)?;
         let endpoint = &self.endpoints[index];
