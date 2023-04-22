@@ -59,17 +59,27 @@ impl EndpointTableEntry {
 
 pub struct UsbBus {
     usb: Mutex<USB_DEVICE>,
-    pll: Mutex<PLL>,
+    pll: Option<Mutex<PLL>>,
     pending_ins: Mutex<Cell<u8>>,
     endpoints: [EndpointTableEntry; MAX_ENDPOINTS],
     dpram_usage: u16,
 }
 
 impl UsbBus {
-    pub fn new(usb: USB_DEVICE, pll: PLL) -> UsbBusAllocator<Self> {
+    pub fn new(usb: USB_DEVICE) -> UsbBusAllocator<Self> {
         UsbBusAllocator::new(Self {
             usb: Mutex::new(usb),
-            pll: Mutex::new(pll),
+            pll: None,
+            pending_ins: Mutex::new(Cell::new(0)),
+            endpoints: Default::default(),
+            dpram_usage: 0,
+        })
+    }
+
+    pub fn new_with_pll(usb: USB_DEVICE, pll: PLL) -> UsbBusAllocator<Self> {
+        UsbBusAllocator::new(Self {
+            usb: Mutex::new(usb),
+            pll: Some(Mutex::new(pll)),
             pending_ins: Mutex::new(Cell::new(0)),
             endpoints: Default::default(),
             dpram_usage: 0,
@@ -383,17 +393,24 @@ impl usb_device::bus::UsbBus for UsbBus {
             usb.udien
                 .modify(|_, w| w.wakeupe().set_bit().suspe().clear_bit());
             usb.usbcon.modify(|_, w| w.frzclk().set_bit());
-            let pll = self.pll.borrow(cs);
-            pll.pllcsr.modify(|_, w| w.plle().clear_bit());
+
+            if let Some(pll_lock) = self.pll.as_ref() {
+                let pll = pll_lock.borrow(cs);
+                pll.pllcsr.modify(|_, w| w.plle().clear_bit());
+            }
         });
     }
 
     fn resume(&self) {
         interrupt::free(|cs| {
+            if let Some(pll_lock) = self.pll.as_ref() {
+                let pll = pll_lock.borrow(cs);
+                pll.pllcsr
+                    .modify(|_, w| w.pindiv().set_bit().plle().set_bit());
+                while pll.pllcsr.read().plock().bit_is_clear() {}
+            }
+
             let usb = self.usb.borrow(cs);
-            let pll = self.pll.borrow(cs);
-            pll.pllcsr
-                .modify(|_, w| w.pindiv().set_bit().plle().set_bit());
             usb.usbcon.modify(|_, w| w.frzclk().clear_bit());
             usb.udint
                 .clear_interrupts(|w| w.wakeupi().clear_bit().suspi().clear_bit());

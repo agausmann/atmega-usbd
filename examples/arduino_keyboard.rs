@@ -52,7 +52,7 @@ fn main() -> ! {
 
     let usb_bus = unsafe {
         static mut USB_BUS: Option<UsbBusAllocator<UsbBus>> = None;
-        &*USB_BUS.insert(UsbBus::new(usb, pll))
+        &*USB_BUS.insert(UsbBus::new_with_pll(usb, pll))
     };
 
     let hid_class = HIDClass::new(&usb_bus, KeyboardReport::desc(), 1);
