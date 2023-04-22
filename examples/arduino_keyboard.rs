@@ -7,14 +7,16 @@
 mod std_stub;
 
 use arduino_hal::{
-    entry, pins,
+    entry,
+    pac::PLL,
+    pins,
     port::{
         mode::{Input, Output, PullUp},
         Pin,
     },
     Peripherals,
 };
-use atmega_usbd::UsbBus;
+use atmega_usbd::{SuspendNotifier, UsbBus};
 use avr_device::{asm::sleep, interrupt};
 use usb_device::{
     class_prelude::UsbBusAllocator,
@@ -51,8 +53,8 @@ fn main() -> ! {
     while pll.pllcsr.read().plock().bit_is_clear() {}
 
     let usb_bus = unsafe {
-        static mut USB_BUS: Option<UsbBusAllocator<UsbBus>> = None;
-        &*USB_BUS.insert(UsbBus::new_with_pll(usb, pll))
+        static mut USB_BUS: Option<UsbBusAllocator<UsbBus<PLL>>> = None;
+        &*USB_BUS.insert(UsbBus::new_with_notifier(usb, pll))
     };
 
     let hid_class = HIDClass::new(&usb_bus, KeyboardReport::desc(), 1);
@@ -77,7 +79,7 @@ fn main() -> ! {
     }
 }
 
-static mut USB_CTX: Option<UsbContext> = None;
+static mut USB_CTX: Option<UsbContext<PLL>> = None;
 
 #[interrupt(atmega32u4)]
 fn USB_GEN() {
@@ -107,15 +109,15 @@ unsafe fn poll_usb() {
     ctx.poll();
 }
 
-struct UsbContext {
-    usb_device: UsbDevice<'static, UsbBus>,
-    hid_class: HIDClass<'static, UsbBus>,
+struct UsbContext<S: SuspendNotifier> {
+    usb_device: UsbDevice<'static, UsbBus<S>>,
+    hid_class: HIDClass<'static, UsbBus<S>>,
     current_index: usize,
     indicator: Pin<Output>,
     trigger: Pin<Input<PullUp>>,
 }
 
-impl UsbContext {
+impl<S: SuspendNotifier> UsbContext<S> {
     fn poll(&mut self) {
         if self.trigger.is_low() {
             if let Some(report) = PAYLOAD

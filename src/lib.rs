@@ -57,29 +57,51 @@ impl EndpointTableEntry {
     }
 }
 
-pub struct UsbBus {
+pub struct UsbBus<S: SuspendNotifier> {
     usb: Mutex<USB_DEVICE>,
-    pll: Option<Mutex<PLL>>,
+    suspend_notifier: Mutex<S>,
     pending_ins: Mutex<Cell<u8>>,
     endpoints: [EndpointTableEntry; MAX_ENDPOINTS],
     dpram_usage: u16,
 }
 
-impl UsbBus {
+impl UsbBus<()> {
+    /// Creates a new [UsbBus] from a `USB_DEVICE` register and [SuspendNotifier] implementation.
+    ///
+    /// Examples:
+    ///
+    /// ```rust
+    /// #use arduino_hal::Peripherals;
+    /// #use atmega_usbd::UsbBus;
+    /// let dp = Peripherals::take().unwrap();
+    /// let _bus = UsbBus::new(dp.USB_DEVICE);
+    /// ```
     pub fn new(usb: USB_DEVICE) -> UsbBusAllocator<Self> {
         UsbBusAllocator::new(Self {
             usb: Mutex::new(usb),
-            pll: None,
+            suspend_notifier: Mutex::new(()),
             pending_ins: Mutex::new(Cell::new(0)),
             endpoints: Default::default(),
             dpram_usage: 0,
         })
     }
+}
 
-    pub fn new_with_pll(usb: USB_DEVICE, pll: PLL) -> UsbBusAllocator<Self> {
+impl<S: SuspendNotifier> UsbBus<S> {
+    /// Creates a new [UsbBus] from a `USB_DEVICE` register and [SuspendNotifier] implementation.
+    ///
+    /// Examples:
+    ///
+    /// ```rust
+    /// #use arduino_hal::Peripherals;
+    /// #use atmega_usbd::UsbBus;
+    /// let dp = Peripherals::take().unwrap();
+    /// let _bus = UsbBus::new_with_notifier(dp.USB_DEVICE, ());
+    /// ```
+    pub fn new_with_notifier(usb: USB_DEVICE, notifier: S) -> UsbBusAllocator<Self> {
         UsbBusAllocator::new(Self {
             usb: Mutex::new(usb),
-            pll: Some(Mutex::new(pll)),
+            suspend_notifier: Mutex::new(notifier),
             pending_ins: Mutex::new(Cell::new(0)),
             endpoints: Default::default(),
             dpram_usage: 0,
@@ -144,7 +166,7 @@ impl UsbBus {
     }
 }
 
-impl usb_device::bus::UsbBus for UsbBus {
+impl<S: SuspendNotifier> usb_device::bus::UsbBus for UsbBus<S> {
     fn alloc_ep(
         &mut self,
         ep_dir: UsbDirection,
@@ -394,21 +416,13 @@ impl usb_device::bus::UsbBus for UsbBus {
                 .modify(|_, w| w.wakeupe().set_bit().suspe().clear_bit());
             usb.usbcon.modify(|_, w| w.frzclk().set_bit());
 
-            if let Some(pll_lock) = self.pll.as_ref() {
-                let pll = pll_lock.borrow(cs);
-                pll.pllcsr.modify(|_, w| w.plle().clear_bit());
-            }
+            self.suspend_notifier.borrow(cs).suspend();
         });
     }
 
     fn resume(&self) {
         interrupt::free(|cs| {
-            if let Some(pll_lock) = self.pll.as_ref() {
-                let pll = pll_lock.borrow(cs);
-                pll.pllcsr
-                    .modify(|_, w| w.pindiv().set_bit().plle().set_bit());
-                while pll.pllcsr.read().plock().bit_is_clear() {}
-            }
+            self.suspend_notifier.borrow(cs).resume();
 
             let usb = self.usb.borrow(cs);
             usb.usbcon.modify(|_, w| w.frzclk().clear_bit());
@@ -545,5 +559,33 @@ impl ClearInterrupts for USBINT {
     {
         // Bits 7:1 are reserved as do not set.
         self.write(|w| f(unsafe { w.bits(0x01) }))
+    }
+}
+
+/// Suspend/resume notification functionality for USB devices.
+///
+/// Safe, easy default - Doesn't modify the PLL, may have higher power consumption but universally works fine even if other peripherals require the PLL clock.
+/// (This should also be recommended by the documentation if power saving is not required)
+///
+/// Easy power saving PLL - Automatically enables/disables PLL, can be used when the USB peripheral is the only one using the PLL.
+///
+/// Custom control - Crate user can write custom logic to handle suspend/resume, so they can still safely power it down in the case where PLL is shared with other peripherals, they just need to provide that logic.
+pub trait SuspendNotifier: Send + Sized + 'static {
+    fn suspend(&self) {}
+    fn resume(&self) {}
+}
+
+impl SuspendNotifier for () {}
+
+impl SuspendNotifier for PLL {
+    fn suspend(&self) {
+        self.pllcsr.modify(|_, w| w.plle().clear_bit());
+    }
+
+    fn resume(&self) {
+        self.pllcsr
+            .modify(|_, w| w.pindiv().set_bit().plle().set_bit());
+
+        while self.pllcsr.read().plock().bit_is_clear() {}
     }
 }
