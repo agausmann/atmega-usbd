@@ -91,7 +91,7 @@ impl UsbBus {
         if usb.usbcon.read().frzclk().bit_is_set() {
             return Err(UsbError::InvalidState);
         }
-        usb.uenum.write(|w| unsafe { w.bits(index as u8) });
+        usb.uenum.write(|w| w.bits(index as u8));
         if usb.uenum.read().bits() & 0b111 != (index as u8) {
             return Err(UsbError::InvalidState);
         }
@@ -269,7 +269,7 @@ impl usb_device::bus::UsbBus for UsbBus {
                 }
 
                 for &byte in buf {
-                    usb.uedatx.write(|w| unsafe { w.bits(byte) })
+                    usb.uedatx.write(|w| w.bits(byte))
                 }
 
                 usb.ueintx.clear_interrupts(|w| w.txini().clear_bit());
@@ -285,7 +285,7 @@ impl usb_device::bus::UsbBus for UsbBus {
                     if usb.ueintx.read().rwal().bit_is_clear() {
                         return Err(UsbError::BufferOverflow);
                     }
-                    usb.uedatx.write(|w| unsafe { w.bits(byte) });
+                    usb.uedatx.write(|w| w.bits(byte));
                 }
 
                 //NB: RXOUTI serves as KILLBK for IN endpoints and needs to stay zero:
