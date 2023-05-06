@@ -497,6 +497,17 @@ impl<S: SuspendNotifier> usb_device::bus::UsbBus for UsbBus<S> {
             PollResult::None
         })
     }
+
+    fn force_reset(&self) -> usb_device::Result<()> {
+        interrupt::free(|cs| {
+            self.usb
+                .borrow(cs)
+                .udcon
+                .modify(|_, w| w.detach().set_bit());
+
+            Ok(())
+        })
+    }
 }
 
 /// Extension trait for conveniently clearing AVR interrupt flag registers.
