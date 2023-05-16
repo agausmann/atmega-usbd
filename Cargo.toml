@@ -7,8 +7,9 @@ edition = "2021"
 avr-device = { version = "0.5", features = ["atmega32u4"] }
 usb-device = "0.2"
 
-[dev-dependencies]
-usbd-hid = "0.6"
+[dev-dependencies.usbd-hid]
+version = "0.6"
+git = "https://github.com/twitchyliquid64/usbd-hid"
 
 [dev-dependencies.arduino-hal]
 git = "https://github.com/Rahix/avr-hal.git"
@@ -18,7 +19,11 @@ features = ["arduino-leonardo"]
 [profile.dev]
 opt-level = "s"
 lto = true
+# Required by current nightly for debug builds
+# See upstream issue: https://github.com/rust-lang/compiler-builtins/issues/523#issuecomment-1547339559
+codegen-units = 1
 
 [profile.release]
 opt-level = "s"
+codegen-units = 1
 lto = true
