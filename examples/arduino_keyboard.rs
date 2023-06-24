@@ -7,7 +7,7 @@
 mod std_stub;
 
 use arduino_hal::{
-    entry, pins,
+    delay_ms, entry, pins,
     port::{
         mode::{Input, Output, PullUp},
         Pin,
@@ -25,7 +25,7 @@ use usbd_hid::{
     hid_class::HIDClass,
 };
 
-const PAYLOAD: &[u8] = b"Hello World";
+const PAYLOAD: &[u8] = b"Hello World ";
 
 #[entry]
 fn main() -> ! {
@@ -35,6 +35,10 @@ fn main() -> ! {
     let usb = dp.USB_DEVICE;
 
     let status = pins.d13.into_output();
+    // To engage the trigger the `D2` pin needs to be pulled low.
+    //
+    // An easy way to do this on a board with exposed GPIO, e.g. Arduino Leonardo,
+    // is to bridge the `d2` digital PWM pin to GND with a jumper cable.
     let trigger = pins.d2.into_pull_up_input();
 
     // Configure PLL interface
@@ -118,21 +122,30 @@ struct UsbContext {
 impl UsbContext {
     fn poll(&mut self) {
         if self.trigger.is_low() {
-            if let Some(report) = PAYLOAD
-                .get(self.current_index)
-                .copied()
-                .and_then(ascii_to_report)
-            {
-                if self.hid_class.push_input(&report).is_ok() {
-                    self.current_index += 1;
-                }
-            } else {
-                self.hid_class.push_input(&BLANK_REPORT).ok();
+            let report = ascii_to_report(PAYLOAD[self.current_index]).unwrap_or(BLANK_REPORT);
+
+            if self.hid_class.push_input(&report).is_ok() {
+                self.current_index = (self.current_index + 1) % PAYLOAD.len();
             }
         } else {
-            self.current_index = 0;
             self.hid_class.push_input(&BLANK_REPORT).ok();
         }
+
+        if self.usb_device.poll(&mut [&mut self.hid_class]) {
+            let mut report_buf = [0u8; 1];
+
+            if self.hid_class.pull_raw_output(&mut report_buf).is_ok() {
+                if report_buf[0] & 2 != 0 {
+                    self.indicator.set_high();
+                } else {
+                    self.indicator.set_low();
+                }
+            }
+        }
+
+        delay_ms(5);
+
+        self.hid_class.push_input(&BLANK_REPORT).ok();
 
         if self.usb_device.poll(&mut [&mut self.hid_class]) {
             let mut report_buf = [0u8; 1];
