@@ -66,42 +66,40 @@ pub struct UsbBus<S: SuspendNotifier> {
 }
 
 impl UsbBus<()> {
-    /// Creates a new [UsbBus] from a `USB_DEVICE` register and [SuspendNotifier] implementation.
+    /// Create a new UsbBus without power-saving functionality.
     ///
-    /// Examples:
-    ///
-    /// ```rust
-    /// #use arduino_hal::Peripherals;
-    /// #use atmega_usbd::UsbBus;
-    /// let dp = Peripherals::take().unwrap();
-    /// let _bus = UsbBus::new(dp.USB_DEVICE);
-    /// ```
+    /// If you would like to disable the PLL when the USB peripheral is
+    /// suspended, then construct the bus with [`UsbBus::with_suspend_notifier`].
     pub fn new(usb: USB_DEVICE) -> UsbBusAllocator<Self> {
-        UsbBusAllocator::new(Self {
-            usb: Mutex::new(usb),
-            suspend_notifier: Mutex::new(()),
-            pending_ins: Mutex::new(Cell::new(0)),
-            endpoints: Default::default(),
-            dpram_usage: 0,
-        })
+        Self::with_suspend_notifier(usb, ())
     }
 }
 
 impl<S: SuspendNotifier> UsbBus<S> {
-    /// Creates a new [UsbBus] from a `USB_DEVICE` register and [SuspendNotifier] implementation.
+    /// Create a UsbBus with a suspend and resume handler.
     ///
-    /// Examples:
+    /// If you want the PLL to be automatically disabled when the USB peripheral
+    /// is suspended, then you can pass the PLL resource here; for example:
     ///
-    /// ```rust
-    /// #use arduino_hal::Peripherals;
-    /// #use atmega_usbd::UsbBus;
-    /// let dp = Peripherals::take().unwrap();
-    /// let _bus = UsbBus::new_with_notifier(dp.USB_DEVICE, ());
     /// ```
-    pub fn new_with_notifier(usb: USB_DEVICE, notifier: S) -> UsbBusAllocator<Self> {
+    /// use avr_device::atmega32u4::Peripherals;
+    /// use atmega_usbd::UsbBus;
+    ///
+    /// let dp = Peripherals.take().unwrap();
+    /// // ... (other initialization stuff)
+    /// let bus = UsbBus::with_suspend_notifier(dp.USB_DEVICE, dp.PLL);
+    /// ```
+    ///
+    /// **Note: If you are using the PLL output for other peripherals like the
+    /// high-speed timer, then disabling the PLL may affect the behavior of
+    /// those peripherals.** In such cases, you can either use [`UsbBus::new`]
+    /// to leave the PLL running, or implement [`SuspendNotifier`] yourself,
+    /// with some custom logic to gracefully shut down the PLL in cooperation
+    /// with your other peripherals.
+    pub fn with_suspend_notifier(usb: USB_DEVICE, suspend_notifier: S) -> UsbBusAllocator<Self> {
         UsbBusAllocator::new(Self {
             usb: Mutex::new(usb),
-            suspend_notifier: Mutex::new(notifier),
+            suspend_notifier: Mutex::new(suspend_notifier),
             pending_ins: Mutex::new(Cell::new(0)),
             endpoints: Default::default(),
             dpram_usage: 0,
@@ -562,16 +560,18 @@ impl ClearInterrupts for USBINT {
     }
 }
 
-/// Suspend/resume notification functionality for USB devices.
+/// Receiver for handling suspend and resume events from the USB device.
 ///
-/// Safe, easy default - Doesn't modify the PLL, may have higher power consumption but universally works fine even if other peripherals require the PLL clock.
-/// (This should also be recommended by the documentation if power saving is not required)
-///
-/// Easy power saving PLL - Automatically enables/disables PLL, can be used when the USB peripheral is the only one using the PLL.
-///
-/// Custom control - Crate user can write custom logic to handle suspend/resume, so they can still safely power it down in the case where PLL is shared with other peripherals, they just need to provide that logic.
+/// See [`UsbBus::with_suspend_notifier`] for more details.
 pub trait SuspendNotifier: Send + Sized + 'static {
+    /// Called by `UsbBus` when the USB peripheral has been suspended and the
+    /// PLL is safe to shut down.
     fn suspend(&self) {}
+
+    /// Called by `UsbBus` when the USB peripheral is about to resume and is
+    /// waiting for PLL to be enabled.
+    ///
+    /// This function should block until PLL lock has been established.
     fn resume(&self) {}
 }
 

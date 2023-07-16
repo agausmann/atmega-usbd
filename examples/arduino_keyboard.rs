@@ -54,7 +54,7 @@ fn main() -> ! {
 
     let usb_bus = unsafe {
         static mut USB_BUS: Option<UsbBusAllocator<UsbBus<PLL>>> = None;
-        &*USB_BUS.insert(UsbBus::new_with_notifier(usb, pll))
+        &*USB_BUS.insert(UsbBus::with_suspend_notifier(usb, pll))
     };
 
     let hid_class = HIDClass::new(&usb_bus, KeyboardReport::desc(), 1);
