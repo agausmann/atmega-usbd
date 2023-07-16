@@ -23,4 +23,4 @@ fn panic(_info: &PanicInfo) -> ! {
 
 #[lang = "eh_personality"]
 #[no_mangle]
-pub unsafe extern "C" fn rust_eh_personality() -> () {}
+pub unsafe extern "C" fn rust_eh_personality() {}

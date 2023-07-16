@@ -77,8 +77,8 @@ fn main() -> ! {
         &*USB_BUS.insert(UsbBus::with_suspend_notifier(usb, pll))
     };
 
-    let hid_class = HIDClass::new(&usb_bus, KeyboardReport::desc(), 1);
-    let usb_device = UsbDeviceBuilder::new(&usb_bus, UsbVidPid(0x1209, 0x0001))
+    let hid_class = HIDClass::new(usb_bus, KeyboardReport::desc(), 1);
+    let usb_device = UsbDeviceBuilder::new(usb_bus, UsbVidPid(0x1209, 0x0001))
         .manufacturer("Foo")
         .product("Bar")
         .build();
