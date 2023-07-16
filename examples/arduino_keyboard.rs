@@ -88,6 +88,7 @@ fn main() -> ! {
             usb_device,
             hid_class,
             current_index: 0,
+            pressed: false,
             indicator: status.downgrade(),
             trigger: trigger.downgrade(),
         });
@@ -133,6 +134,7 @@ struct UsbContext<S: SuspendNotifier> {
     usb_device: UsbDevice<'static, UsbBus<S>>,
     hid_class: HIDClass<'static, UsbBus<S>>,
     current_index: usize,
+    pressed: bool,
     indicator: Pin<Output>,
     trigger: Pin<Input<PullUp>>,
 }
@@ -140,19 +142,25 @@ struct UsbContext<S: SuspendNotifier> {
 impl<S: SuspendNotifier> UsbContext<S> {
     fn poll(&mut self) {
         if self.trigger.is_low() {
-            if let Some(report) = PAYLOAD
-                .get(self.current_index)
-                .copied()
-                .and_then(ascii_to_report)
-            {
-                if self.hid_class.push_input(&report).is_ok() {
+            let next_report = if self.pressed {
+                BLANK_REPORT
+            } else {
+                PAYLOAD
+                    .get(self.current_index)
+                    .copied()
+                    .and_then(ascii_to_report)
+                    .unwrap_or(BLANK_REPORT)
+            };
+
+            if self.hid_class.push_input(&next_report).is_ok() {
+                if self.pressed && self.current_index < PAYLOAD.len() {
                     self.current_index += 1;
                 }
-            } else {
-                self.hid_class.push_input(&BLANK_REPORT).ok();
+                self.pressed = !self.pressed;
             }
         } else {
             self.current_index = 0;
+            self.pressed = false;
             self.hid_class.push_input(&BLANK_REPORT).ok();
         }
 
