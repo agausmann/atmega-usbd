@@ -40,7 +40,9 @@ use atmega_usbd::{SuspendNotifier, UsbBus};
 use avr_device::{asm::sleep, interrupt};
 use usb_device::{
     class_prelude::UsbBusAllocator,
+    descriptor::lang_id::LangID::EN,
     device::{UsbDevice, UsbDeviceBuilder, UsbVidPid},
+    prelude::StringDescriptors,
 };
 use usbd_hid::{
     descriptor::{KeyboardReport, SerializedDescriptor},
@@ -78,9 +80,12 @@ fn main() -> ! {
     };
 
     let hid_class = HIDClass::new(usb_bus, KeyboardReport::desc(), 1);
-    let usb_device = UsbDeviceBuilder::new(usb_bus, UsbVidPid(0x1209, 0x0001))
+    let strings = StringDescriptors::new(EN)
         .manufacturer("Foo")
-        .product("Bar")
+        .product("Bar");
+    let usb_device = UsbDeviceBuilder::new(usb_bus, UsbVidPid(0x1209, 0x0001))
+        .strings(&[strings])
+        .unwrap()
         .build();
 
     unsafe {

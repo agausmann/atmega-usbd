@@ -204,7 +204,7 @@ impl<S: SuspendNotifier> usb_device::bus::UsbBus for UsbBus<S> {
         let entry = &mut self.endpoints[ep_addr.index()];
         entry.eptype_bits = match ep_type {
             EndpointType::Control => EP_TYPE_CONTROL,
-            EndpointType::Isochronous => EP_TYPE_ISOCHRONOUS,
+            EndpointType::Isochronous { .. } => EP_TYPE_ISOCHRONOUS,
             EndpointType::Bulk => EP_TYPE_BULK,
             EndpointType::Interrupt => EP_TYPE_INTERRUPT,
         };
